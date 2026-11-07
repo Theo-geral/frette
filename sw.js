@@ -1,6 +1,6 @@
 /* Frette — fonctionnement hors ligne. Change VERSION à chaque mise à jour des fichiers. */
-const VERSION = 'frette-v5';
-const ASSETS = ['./', 'index.html', 'style.css', 'core.js', 'app.js', 'manifest.webmanifest',
+const VERSION = 'frette-v6';
+const ASSETS = ['./', 'index.html', 'style.css', 'core.js', 'course.js', 'course-ui.js', 'app.js', 'manifest.webmanifest',
   'icon-192.png', 'icon-512.png', 'maskable-512.png'];
 
 self.addEventListener('install', (e) => {

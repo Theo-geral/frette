@@ -75,13 +75,18 @@
     },
     click(when, strong) {
       const c = this.ctx();
-      const o = c.createOscillator(), g = c.createGain();
-      o.frequency.value = strong ? 2600 : 2000; // au-dessus de la plage détectée : pas de fausse note
-      g.gain.setValueAtTime(0.0001, when);
-      g.gain.exponentialRampToValueAtTime(strong ? 0.5 : 0.3, when + 0.003);
-      g.gain.exponentialRampToValueAtTime(0.0001, when + 0.05);
-      o.connect(g).connect(c.destination);
-      o.start(when); o.stop(when + 0.06);
+      if (!this.nb) {
+        const n = Math.floor(c.sampleRate * 0.025);
+        this.nb = c.createBuffer(1, n, c.sampleRate);
+        const d = this.nb.getChannelData(0);
+        for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (n / 5));
+      }
+      const src = c.createBufferSource(), hp = c.createBiquadFilter(), g = c.createGain();
+      src.buffer = this.nb;
+      hp.type = 'highpass'; hp.frequency.value = strong ? 5000 : 3500;
+      g.gain.value = strong ? 1.4 : 0.9;
+      src.connect(hp).connect(g).connect(c.destination);
+      src.start(when);
     },
   };
 
@@ -122,7 +127,7 @@
       const s = this.s;
       this.an.getFloatTimeDomainData(this.buf);
       s.now = now;
-      const r = C.rms(this.buf, this.buf.length - 1024);
+      const r = this.lowRms(1024);
       if (r < s.noise) s.noise = s.noise * 0.7 + r * 0.3; else s.noise = Math.min(s.noise * 1.003, 0.05);
       s.gate = Math.max(0.0035, s.noise * 2.5);
       s.rms = r;
@@ -161,6 +166,12 @@
       const bar = document.getElementById('levelBar');
       if (bar) bar.style.width = Math.round(s.level * 100) + '%';
       this.subs.forEach((f) => f(s));
+    },
+    lowRms(n) {
+      const b = this.buf, a = 1 - Math.exp((-2 * Math.PI * 1200) / this.sr);
+      let y1 = b[b.length - n], y2 = y1, acc = 0;
+      for (let i = b.length - n; i < b.length; i++) { y1 += a * (b[i] - y1); y2 += a * (y1 - y2); acc += y2 * y2; }
+      return Math.sqrt(acc / n);
     },
     chroma() {
       this.anC.getFloatFrequencyData(this.spec);
@@ -206,6 +217,7 @@
   document.addEventListener('click', (e) => {
     const t = e.target.closest('[data-act="mic"]');
     if (t && !Engine.running) startMic();
+    if (e.target.closest('[data-act="course"]')) { Notes.mode = 'list'; show('notes'); }
   });
 
   /* ================= Dessins SVG ================= */
@@ -219,6 +231,7 @@
     [3, 5, 7, 9].filter((f) => f <= frets).forEach((f) => {
       s += '<circle cx="' + (L + (f - 0.5) * fw) + '" cy="' + (T + 2.5 * G) + '" r="5" fill="#d9cbbb" opacity=".35"/>';
     });
+    if (frets >= 12) [1.5, 3.5].forEach((k) => { s += '<circle cx="' + (L + 11.5 * fw) + '" cy="' + (T + k * G) + '" r="4" fill="#d9cbbb" opacity=".35"/>'; });
     for (let f = 1; f <= frets; f++) s += '<line x1="' + (L + f * fw) + '" y1="' + (T - 9) + '" x2="' + (L + f * fw) + '" y2="' + (T + 5 * G + 9) + '" stroke="#a89584" stroke-width="2.2"/>';
     s += '<rect x="' + (L - 5) + '" y="' + (T - 9) + '" width="6" height="' + (G * 5 + 18) + '" rx="1.5" fill="#efe4d6"/>';
     for (let st = 0; st < 6; st++) {
@@ -232,7 +245,8 @@
       const x = t.fret === 0 ? L - 22 : L + (t.fret - 0.5) * fw, y = T + (5 - t.string) * G;
       const col = C.STRINGS[t.string].color;
       s += '<circle cx="' + x + '" cy="' + y + '" r="12" fill="' + col + '" stroke="#1a120f" stroke-width="2.5"/>';
-      s += '<text x="' + x + '" y="' + (y + 4.5) + '" fill="#1a120f" font-size="13" font-weight="700" text-anchor="middle" font-family="Barlow Condensed, sans-serif">' + (t.fret === 0 ? '0' : t.fret) + '</text>';
+      const lab = String(t.label != null ? t.label : t.fret);
+      s += '<text x="' + x + '" y="' + (y + 4.5) + '" fill="#1a120f" font-size="' + (lab.length > 2 ? 10 : 13) + '" font-weight="700" text-anchor="middle" font-family="Barlow Condensed, sans-serif">' + esc(lab) + '</text>';
     });
     return s + '</svg>';
   }
@@ -299,8 +313,21 @@
       s += '<circle class="hub" cx="' + cx + '" cy="' + cy + '" r="7"/>';
       return s + '</svg>';
     },
+    setGoal() {
+      this.tuned = new Set(); this.goal = true;
+      this.el.insertAdjacentHTML('afterbegin', '<div class="goal" id="tnGoal"><span>Leçon : accorde les 6 cordes jusqu\u2019à « Juste ! »</span><b id="tnGoalN">0 / 6</b></div>');
+      this.syncMode();
+    },
     syncMode() {
       const auto = this.manual == null;
+      const gn = $('#tnGoalN', this.el);
+      if (gn) gn.textContent = this.tuned.size + ' / 6';
+      if (this.goal && this.tuned.size >= 6) {
+        this.goal = false;
+        Store.saveBest('tuner', 'all', 100);
+        const g = $('#tnGoal', this.el);
+        if (g) g.innerHTML = '<span>Leçon validée : ta guitare est accordée !</span><button class="chip" type="button" data-act="course">Retour au cours</button>';
+      }
       $('#tnAuto', this.el).setAttribute('aria-pressed', String(auto));
       $('#tnMode', this.el).textContent = auto ? 'Corde détectée automatiquement' : 'Corde ' + C.STRINGS[this.manual].num + ' choisie';
       this.el.querySelectorAll('.strings6 button').forEach((b) => {
@@ -349,7 +376,34 @@
     },
   };
 
-  /* ================= Exercices de notes ================= */
+  /* ================= Cours ================= */
+  const K = window.FretteCourse;
+  const ALL_LESSONS = [];
+  K.COURSE.forEach((ch, ci) => ch.lessons.forEach((l) => { l.chapter = ch; l.chapterNum = ci + 1; ALL_LESSONS.push(l); }));
+  const TYPE_LABEL = { theory: 'Théorie', notes: 'Notes', rhythm: 'Rythme', chords: 'Accords', song: 'Morceau', tuner: 'Accordage' };
+  const Progress = {
+    best(l) {
+      switch (l.type) {
+        case 'theory': return Store.best('theory', l.id);
+        case 'notes': return Store.best('lessons', l.lesson);
+        case 'rhythm': return Store.best('rhythm', l.id);
+        case 'chords': return Store.best('chords', l.id);
+        case 'song': return Store.best('songs', l.song);
+        case 'tuner': return Store.best('tuner', 'all');
+      }
+      return null;
+    },
+    done(l) {
+      const b = this.best(l);
+      if (b == null) return false;
+      return l.type === 'theory' ? b >= 50 : b >= 70;
+    },
+    next() { return ALL_LESSONS.find((l) => !this.done(l)) || null; },
+    after(l) { const i = ALL_LESSONS.indexOf(l); return i >= 0 ? ALL_LESSONS[i + 1] || null : null; },
+  };
+  const BACK = '<button class="back" type="button" aria-label="Retour au cours"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 5l-7 7 7 7"/></svg></button>';
+  const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
+
   const Notes = {
     mode: 'list',
     mount(el) {
@@ -358,43 +412,258 @@
       this.sub = (s) => this.frame(s);
       Engine.subs.add(this.sub);
     },
-    unmount() { Engine.subs.delete(this.sub); clearTimeout(this.timer); if (this.mode === 'play') this.mode = 'list'; },
+    unmount() {
+      Engine.subs.delete(this.sub); clearTimeout(this.timer);
+      if (this.mode !== 'list' && this.mode !== 'theory') this.mode = 'list';
+      if (this.rh) this.rh.running = false;
+    },
+    head(title, count) {
+      return '<div class="bar-head">' + BACK + '<h2>' + esc(title) + '</h2>' + (count ? '<span class="count" id="hdCount">' + count + '</span>' : '') + '</div>';
+    },
+    bindBack() {
+      const b = $('.back', this.el);
+      if (b) b.addEventListener('click', () => { this.mode = 'list'; if (this.rh) this.rh.running = false; this.render(); });
+    },
+    nextButtons(again) {
+      const nx = this.current ? Progress.after(this.current) : null;
+      return '<div class="row">' + (again ? '<button class="btn" id="lsAgain" type="button">Recommencer</button>' : '') +
+        (nx ? '<button class="btn primary" id="lsNext" type="button">Leçon suivante</button>' : '<button class="btn primary" id="lsList" type="button">Retour au cours</button>') + '</div>';
+    },
+    bindNext(again) {
+      const n = $('#lsNext', this.el), li = $('#lsList', this.el), a = $('#lsAgain', this.el);
+      if (n) n.addEventListener('click', () => this.runLesson(Progress.after(this.current)));
+      if (li) li.addEventListener('click', () => { this.mode = 'list'; this.render(); });
+      if (a && again) a.addEventListener('click', again);
+    },
+    runLesson(l) {
+      if (!l) { this.mode = 'list'; this.render(); return; }
+      this.current = l;
+      $('#main').scrollTop = 0;
+      switch (l.type) {
+        case 'notes': this.start(C.LESSONS.find((x) => x.id === l.lesson)); break;
+        case 'theory': this.th = { page: 0, q: -1, picked: null, score: 0 }; this.mode = 'theory'; this.render(); break;
+        case 'rhythm': this.rh = null; this.mode = 'rhythm'; this.render(); break;
+        case 'chords': this.mode = 'list'; show('chords'); Chords.preset(l); break;
+        case 'song': this.mode = 'list'; openSong(l.song); break;
+        case 'tuner': this.mode = 'list'; show('tuner'); Tuner.setGoal(); break;
+      }
+    },
     render() {
       const el = this.el;
-      if (this.mode === 'list') {
-        el.innerHTML = micNotice() +
-          '<div><div class="eyebrow">Première position</div><h1 style="font-size:32px">Apprendre les notes</h1></div>' +
-          '<p class="lead">Une note s’affiche, tu la joues, Frette vérifie à l’oreille. Commence par les cordes à vide.</p>' +
-          '<div class="list">' + C.LESSONS.map((l) => {
-            const b = Store.best('lessons', l.id);
-            return '<button class="item" type="button" data-id="' + l.id + '"><h3>' + esc(l.title) + '</h3><p>' + esc(l.desc) + '</p>' +
-              '<span class="side">' + starsHtml(starsOf(b)) + '<span class="best">' + (b != null ? 'record ' + b + ' %' : 'à faire') + '</span></span></button>';
-          }).join('') + '</div>';
-        el.querySelectorAll('.item').forEach((b) => b.addEventListener('click', () => this.start(C.LESSONS.find((l) => l.id === b.dataset.id))));
-      } else if (this.mode === 'play') {
-        el.innerHTML = micNotice() +
-          '<div class="bar-head"><button class="back" type="button" aria-label="Retour"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 5l-7 7 7 7"/></svg></button>' +
-          '<h2>' + esc(this.lesson.title) + '</h2><span class="count" id="ntCount"></span></div>' +
+      if (this.mode === 'list') this.renderList();
+      else if (this.mode === 'theory') this.renderTheory();
+      else if (this.mode === 'rhythm') this.renderRhythm();
+      else if (this.mode === 'play') {
+        el.innerHTML = micNotice() + this.head(this.lesson.title, ' ') +
           '<div class="progress"><i id="ntProg"></i></div>' +
           '<div class="target" id="ntTarget"><div class="big" id="ntNote"></div><div class="where" id="ntWhere"></div></div>' +
           '<div class="board-wrap" id="ntBoard"></div>' +
           '<div class="heard">Entendu : <b id="ntHeard">—</b></div>' +
           '<p class="tip">Appuie juste derrière la frette avec le bout du doigt, puis pince la corde une fois.</p>' +
           '<div class="row"><button class="btn ghost" id="ntSkip" type="button">Passer cette note</button></div>';
-        $('.back', el).addEventListener('click', () => { this.mode = 'list'; this.render(); });
+        this.bindBack();
         $('#ntSkip', el).addEventListener('click', () => { this.wrong++; this.next(); });
         this.showTarget();
       } else {
         const pct = this.pct;
-        el.innerHTML = '<div class="bar-head"><button class="back" type="button" aria-label="Retour"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 5l-7 7 7 7"/></svg></button><h2>' + esc(this.lesson.title) + '</h2></div>' +
+        el.innerHTML = this.head(this.lesson.title) +
           '<div class="result"><div class="eyebrow">Précision</div><div class="pct">' + pct + ' %</div>' + starsHtml(starsOf(pct)) +
-          '<p>' + this.right + ' notes justes, ' + this.wrong + ' erreur' + (this.wrong > 1 ? 's' : '') + '.</p></div>' +
-          '<div class="row"><button class="btn primary" id="ntAgain" type="button">Recommencer</button><button class="btn" id="ntList" type="button">Autres exercices</button></div>';
-        $('.back', el).addEventListener('click', () => { this.mode = 'list'; this.render(); });
-        $('#ntList', el).addEventListener('click', () => { this.mode = 'list'; this.render(); });
-        $('#ntAgain', el).addEventListener('click', () => this.start(this.lesson));
+          '<p>' + this.right + ' notes justes, ' + this.wrong + ' erreur' + (this.wrong > 1 ? 's' : '') + '.</p>' +
+          (pct < 70 ? '<p>Il faut 70 % pour valider la leçon. Recommence tranquillement.</p>' : '') + '</div>' +
+          this.nextButtons(true);
+        this.bindBack();
+        this.bindNext(() => this.start(this.lesson));
       }
     },
+
+    /* ----- liste du cours ----- */
+    renderList() {
+      const el = this.el;
+      const nx = Progress.next();
+      const nd = ALL_LESSONS.filter((l) => Progress.done(l)).length;
+      let h = '<div><div class="eyebrow">Ton parcours</div><h1 style="font-size:32px">Apprendre la guitare</h1></div>' +
+        '<div class="course-prog"><div class="progress"><i style="width:' + Math.round((nd / ALL_LESSONS.length) * 100) + '%"></i></div><span>' + nd + ' / ' + ALL_LESSONS.length + ' leçons</span></div>';
+      if (nx) {
+        h += '<button class="continue" type="button" data-id="' + nx.id + '"><span class="eyebrow">' + (nd ? 'Continuer' : 'Commencer') + ' · chapitre ' + nx.chapterNum + '</span>' +
+          '<b>' + esc(nx.title) + '</b><span class="ctype">' + TYPE_LABEL[nx.type] + (nx.desc ? ' · ' + esc(nx.desc) : '') + '</span></button>';
+      } else {
+        h += '<div class="notice"><p>Bravo, tu as terminé tout le cours ! Continue avec les morceaux, ou importe des tablatures dans l’onglet Chercher.</p></div>';
+      }
+      K.COURSE.forEach((ch, ci) => {
+        const d = ch.lessons.filter((l) => Progress.done(l)).length;
+        h += '<section class="chap"><div class="chap-head"><span class="chap-num">' + (ci + 1) + '</span><h2>' + esc(ch.title) + '</h2><span class="chap-prog' + (d === ch.lessons.length ? ' full' : '') + '">' + d + '/' + ch.lessons.length + '</span></div><div class="lessons">';
+        ch.lessons.forEach((l) => {
+          const done = Progress.done(l), b = Progress.best(l), isNext = nx === l;
+          const score = (l.type === 'notes' || l.type === 'rhythm' || l.type === 'song') && b != null ? starsHtml(starsOf(b)) : '';
+          h += '<button class="lrow' + (done ? ' done' : '') + (isNext ? ' next' : '') + '" type="button" data-id="' + l.id + '">' +
+            '<span class="lstate">' + (done ? CHECK : '') + '</span>' +
+            '<span class="lmain"><b>' + esc(l.title) + '</b><small>' + TYPE_LABEL[l.type] + (l.desc ? ' · ' + esc(l.desc) : '') + '</small></span>' +
+            '<span class="lscore">' + score + '</span></button>';
+        });
+        h += '</div></section>';
+      });
+      el.innerHTML = h;
+      el.querySelectorAll('[data-id]').forEach((b) => b.addEventListener('click', () => this.runLesson(ALL_LESSONS.find((l) => l.id === b.dataset.id))));
+    },
+
+    /* ----- théorie et quiz ----- */
+    renderTheory() {
+      const el = this.el, l = this.current, th = this.th;
+      const nP = l.pages.length, quiz = l.quiz || [], nQ = quiz.length, steps = nP + nQ;
+      if (th.q < 0) {
+        const pg = l.pages[th.page];
+        const last = th.page === nP - 1;
+        el.innerHTML = this.head(l.title, (th.page + 1) + ' / ' + nP) +
+          '<div class="progress"><i style="width:' + ((th.page + 1) / steps) * 100 + '%"></i></div>' +
+          '<article class="theory"><h2>' + esc(pg.h) + '</h2>' +
+          (pg.fig ? '<figure class="fig">' + window.FretteFigs.figure(pg.fig, { fretboard, chordDiagram }) + '</figure>' : '') +
+          '<p>' + pg.body + '</p></article>' +
+          '<div class="row">' + (th.page > 0 ? '<button class="btn ghost" id="thPrev" type="button">Précédent</button>' : '') +
+          '<button class="btn primary" id="thNext" type="button">' + (!last ? 'Suivant' : nQ ? 'Passer au quiz' : 'Terminer la leçon') + '</button></div>';
+        this.bindBack();
+        const pv = $('#thPrev', el); if (pv) pv.addEventListener('click', () => { th.page--; this.render(); $('#main').scrollTop = 0; });
+        $('#thNext', el).addEventListener('click', () => {
+          if (!last) th.page++;
+          else if (nQ) { th.q = 0; th.picked = null; }
+          else { th.q = 0; Store.saveBest('theory', l.id, 100); th.final = 100; }
+          this.render(); $('#main').scrollTop = 0;
+        });
+        return;
+      }
+      if (th.q >= nQ) {
+        const pct = th.final != null ? th.final : Math.round((th.score / nQ) * 100);
+        el.innerHTML = this.head(l.title) +
+          '<div class="result">' + (nQ ? '<div class="eyebrow">Quiz</div><div class="pct">' + th.score + ' / ' + nQ + '</div>' + starsHtml(starsOf(pct)) : '<div class="eyebrow">Leçon terminée</div>' + starsHtml(3)) +
+          (nQ && pct < 50 ? '<p>Relis les pages et retente le quiz pour valider la leçon.</p>' : '<p>Leçon validée.</p>') + '</div>' +
+          this.nextButtons(true);
+        this.bindBack();
+        this.bindNext(() => { this.th = { page: 0, q: -1, picked: null, score: 0 }; this.render(); });
+        return;
+      }
+      const qq = quiz[th.q];
+      el.innerHTML = this.head(l.title, 'Quiz') +
+        '<div class="progress"><i style="width:' + ((nP + th.q + 1) / steps) * 100 + '%"></i></div>' +
+        '<div class="quiz"><div class="eyebrow">Question ' + (th.q + 1) + ' sur ' + nQ + '</div><h2>' + esc(qq.q) + '</h2>' +
+        '<div class="opts">' + qq.options.map((o, i) => '<button class="opt" type="button" data-i="' + i + '">' + esc(o) + '</button>').join('') + '</div>' +
+        '<p class="why" id="qWhy" hidden></p></div>' +
+        '<div class="row"><button class="btn primary" id="qNext" type="button" hidden>' + (th.q + 1 < nQ ? 'Question suivante' : 'Voir le résultat') + '</button></div>';
+      this.bindBack();
+      el.querySelectorAll('.opt').forEach((b) => b.addEventListener('click', () => {
+        if (th.picked != null) return;
+        const i = +b.dataset.i; th.picked = i;
+        const ok = i === qq.answer;
+        if (ok) th.score++;
+        el.querySelectorAll('.opt').forEach((x) => {
+          const k = +x.dataset.i;
+          if (k === qq.answer) x.classList.add('right');
+          else if (k === i) x.classList.add('wrong');
+          x.disabled = true;
+        });
+        const w = $('#qWhy', el);
+        w.innerHTML = '<b>' + (ok ? 'Exact !' : 'Pas tout à fait.') + '</b> ' + esc(qq.why);
+        w.className = 'why ' + (ok ? 'ok' : 'bad'); w.hidden = false;
+        $('#qNext', el).hidden = false;
+      }));
+      $('#qNext', el).addEventListener('click', () => {
+        th.q++; th.picked = null;
+        if (th.q >= nQ) Store.saveBest('theory', l.id, Math.round((th.score / nQ) * 100));
+        this.render();
+      });
+    },
+
+    /* ----- exercice de rythme ----- */
+    renderRhythm() {
+      const el = this.el, l = this.current;
+      const lab = ['1', 'et', '2', 'et', '3', 'et', '4', 'et'];
+      el.innerHTML = micNotice() + this.head(l.title) +
+        '<div class="rh-instr">' + esc(l.instr) + '</div>' +
+        '<div class="rh-beat"><div class="rh-count" id="rhCount">·</div><div class="rh-tempo">' + l.bpm + ' BPM</div></div>' +
+        '<div class="rh-grid"><div class="rh-bar rh-lab"><span class="rh-num"></span><div class="rh-cells">' + lab.map((x, i) => '<span class="' + (i % 2 ? 'et' : '') + '">' + x + '</span>').join('') + '</div></div>' +
+        l.bars.map((bar, bi) => '<div class="rh-bar"><span class="rh-num">' + (bi + 1) + '</span><div class="rh-cells">' +
+          [0, 1, 2, 3, 4, 5, 6, 7].map((k) => '<i class="' + (bar.includes(k / 2) ? 'on' : '') + '" data-b="' + bi + '" data-k="' + k + '"></i>').join('') + '</div></div>').join('') +
+        '</div>' +
+        '<div id="rhOut"><p class="tip">Après 4 clics de décompte, joue sur chaque case dorée. Le clic du temps 1 est plus aigu. Pose le téléphone près de la guitare.</p>' +
+        '<div class="row"><button class="btn primary" id="rhGo" type="button">Démarrer</button></div></div>';
+      this.bindBack();
+      $('#rhGo', el).addEventListener('click', () => this.rhStart());
+    },
+    rhStart() {
+      if (!Engine.running) { startMic().then(() => { if (Engine.running) this.rhStart(); }); return; }
+      const l = this.current, el = this.el;
+      const exp = [];
+      l.bars.forEach((bar, bi) => bar.forEach((b) => exp.push({ beat: bi * 4 + b, el: $('i[data-b="' + bi + '"][data-k="' + b * 2 + '"]', el), dev: null })));
+      exp.forEach((e, i) => {
+        const a = i > 0 ? e.beat - exp[i - 1].beat : 2, z = i + 1 < exp.length ? exp[i + 1].beat - e.beat : 2;
+        e.win = Math.min(0.45, a / 2, z / 2);
+      });
+      el.querySelectorAll('.rh-cells i').forEach((c) => c.classList.remove('got', 'good', 'ok', 'off', 'miss', 'cur'));
+      const ctx = Out.ctx(), spb = 60 / l.bpm, lead = 0.4, total = 4 + l.bars.length * 4;
+      const tA = ctx.currentTime + lead;
+      for (let k = 0; k < total; k++) Out.click(tA + k * spb, k % 4 === 0);
+      const lat = (ctx.outputLatency || 0) + (ctx.baseLatency || 0);
+      this.rh = { spb, t0: performance.now() / 1000 + lead + lat + 4 * spb, exp, pending: null, consumed: Engine.s.onsetSeq, end: l.bars.length * 4, running: true, cur: null };
+      $('#rhOut', el).innerHTML = '<p class="tip">Écoute le décompte…</p><div class="row"><button class="btn ghost" id="rhStop" type="button">Arrêter</button></div>';
+      $('#rhStop', el).addEventListener('click', () => { this.rh.running = false; this.render(); });
+    },
+    rhFrame(s) {
+      const r = this.rh; if (!r || !r.running) return;
+      const beat = (s.now - r.t0) / r.spb;
+      const cnt = $('#rhCount', this.el);
+      if (cnt) {
+        const n = beat < 0 ? Math.floor(beat + 4) + 1 : (Math.floor(beat) % 4) + 1;
+        cnt.textContent = beat < -4 ? '·' : String(Math.max(1, n));
+        cnt.className = 'rh-count' + (beat < 0 ? ' pre' : '') + (beat - Math.floor(beat) < 0.15 ? ' tick' : '');
+      }
+      const ci = Math.floor(beat * 2);
+      if (ci !== r.ci) {
+        r.ci = ci;
+        if (r.cur) r.cur.classList.remove('cur');
+        r.cur = beat >= 0 ? $('i[data-b="' + Math.floor(ci / 8) + '"][data-k="' + (ci % 8) + '"]', this.el) : null;
+        if (r.cur) r.cur.classList.add('cur');
+      }
+      if (s.onsetSeq > r.consumed) { r.consumed = s.onsetSeq; r.pending = s.lastOnset; }
+      if (r.pending != null) {
+        if (s.voiced) { this.rhRegister(r.pending); r.pending = null; }
+        else if (s.now - r.pending > 0.25) r.pending = null;
+      }
+      if (beat > r.end + 0.6) this.rhFinish();
+    },
+    rhRegister(t) {
+      const r = this.rh, b = (t - r.t0) / r.spb;
+      let best = null, bd = 1e9;
+      r.exp.forEach((e) => { if (e.dev != null) return; const d = Math.abs(b - e.beat); if (d < bd) { bd = d; best = e; } });
+      if (!best || bd > best.win) return;
+      best.dev = (b - best.beat) * r.spb * 1000;
+      if (best.el) best.el.classList.add('got');
+    },
+    rhFinish() {
+      const r = this.rh; r.running = false;
+      if (r.cur) r.cur.classList.remove('cur');
+      const devs = r.exp.filter((e) => e.dev != null).map((e) => e.dev).sort((a, b) => a - b);
+      const med = devs.length ? Math.max(-150, Math.min(150, devs[devs.length >> 1])) : 0;
+      let good = 0, ok = 0, off = 0, miss = 0;
+      r.exp.forEach((e) => {
+        let cls;
+        if (e.dev == null) { miss++; cls = 'miss'; }
+        else {
+          const a = Math.abs(e.dev - med);
+          if (a <= 80) { good++; cls = 'good'; } else if (a <= 150) { ok++; cls = 'ok'; } else { off++; cls = 'off'; }
+        }
+        if (e.el) { e.el.classList.remove('got'); e.el.classList.add(cls); }
+      });
+      const n = r.exp.length;
+      const pct = Math.round(((good + ok * 0.6 + off * 0.2) / n) * 100);
+      Store.saveBest('rhythm', this.current.id, pct);
+      const cnt = $('#rhCount', this.el); if (cnt) { cnt.textContent = '·'; cnt.className = 'rh-count'; }
+      $('#rhOut', this.el).innerHTML =
+        '<div class="result compact"><div class="pct">' + pct + ' %</div>' + starsHtml(starsOf(pct)) +
+        '<p><span class="dot good"></span>' + good + ' en place · <span class="dot ok"></span>' + ok + ' presque · <span class="dot off"></span>' + off + ' décalées · <span class="dot miss"></span>' + miss + ' manquées</p>' +
+        (pct < 70 ? '<p>Il faut 70 % pour valider. Compte à voix haute avec le métronome, ça aide beaucoup.</p>' : '') + '</div>' +
+        this.nextButtons(true);
+      this.bindNext(() => this.rhStart());
+    },
+
+    /* ----- exercice de notes ----- */
     start(lesson) {
       this.lesson = lesson;
       this.targets = C.lessonTargets(lesson);
@@ -410,7 +679,7 @@
       $('#ntWhere', this.el).innerHTML = 'Corde <b>' + st.num + '</b> (' + st.name + ') · ' + (t.fret === 0 ? '<b>à vide</b>' : 'case <b>' + t.fret + '</b>');
       $('#ntBoard', this.el).innerHTML = fretboard([t], 5);
       $('#ntTarget', this.el).className = 'target';
-      $('#ntCount', this.el).textContent = (this.i + 1) + ' / ' + this.targets.length;
+      $('#hdCount', this.el).textContent = (this.i + 1) + ' / ' + this.targets.length;
       $('#ntProg', this.el).style.width = (this.i / this.targets.length) * 100 + '%';
     },
     next() {
@@ -419,11 +688,13 @@
       if (this.i >= this.targets.length) {
         this.pct = Math.round((this.right / Math.max(1, this.right + this.wrong)) * 100);
         Store.saveBest('lessons', this.lesson.id, this.pct);
+        if (!this.current || this.current.lesson !== this.lesson.id) this.current = ALL_LESSONS.find((l) => l.lesson === this.lesson.id) || null;
         this.mode = 'result';
         this.render();
       } else this.showTarget();
     },
     frame(s) {
+      if (this.mode === 'rhythm') { this.rhFrame(s); return; }
       if (this.mode !== 'play') return;
       const h = $('#ntHeard', this.el);
       if (h) h.textContent = s.stableMidi != null ? C.noteName(s.stableMidi).fr : s.voiced ? '…' : '—';
@@ -462,6 +733,7 @@
     render() {
       const el = this.el;
       el.innerHTML = micNotice() +
+        (this.goal ? '<div class="goal" id="chGoal"><span>Leçon : ' + esc(this.goal.title) + '</span><b id="chGoalN">' + this.goal.n + ' / ' + this.goal.count + '</b></div>' : '') +
         '<div><div class="eyebrow">Accords de base</div><h1 style="font-size:32px">Apprendre les accords</h1></div>' +
         '<div class="chord-chips">' + C.CHORDS.map((c) => '<button type="button" data-id="' + c.id + '" aria-pressed="' + this.sel.includes(c.id) + '">' + c.id + '</button>').join('') + '</div>' +
         '<label class="switch"><input type="checkbox" id="chMulti"' + (this.multi ? ' checked' : '') + '> Enchaîner plusieurs accords</label>' +
@@ -472,14 +744,31 @@
         '<p class="tip">Les chiffres sont les doigts de la main gauche : 1 index, 2 majeur, 3 annulaire, 4 auriculaire.</p>';
       el.querySelectorAll('.chord-chips button').forEach((b) => b.addEventListener('click', () => this.pick(b.dataset.id)));
       $('#chMulti', el).addEventListener('change', (e) => {
-        this.multi = e.target.checked;
+        this.multi = e.target.checked; this.goal = null;
         if (!this.multi) this.sel = [this.target().id];
         else if (this.sel.length === 1) this.sel = this.sel[0] === 'Em' ? ['Em', 'Am'] : [this.sel[0], 'Em'];
         this.resetSeq(); this.render();
       });
       this.showChord();
     },
+    preset(l) {
+      this.multi = l.set.length > 1; this.sel = l.set.slice();
+      this.goal = { id: l.id, title: l.title, count: l.count, n: 0 };
+      this.resetSeq(); this.render();
+    },
+    goalTick() {
+      const g = this.goal; if (!g) return;
+      g.n++;
+      const n = $('#chGoalN', this.el); if (n) n.textContent = g.n + ' / ' + g.count;
+      if (g.n >= g.count) {
+        Store.saveBest('chords', g.id, 100);
+        this.goal = null;
+        const box = $('#chGoal', this.el);
+        if (box) box.innerHTML = '<span>Leçon validée !</span><button class="chip" type="button" data-act="course">Retour au cours</button>';
+      }
+    },
     pick(id) {
+      this.goal = null;
       if (!this.multi) this.sel = [id];
       else if (this.sel.includes(id)) { if (this.sel.length > 2) this.sel = this.sel.filter((x) => x !== id); }
       else this.sel = this.sel.concat(id);
@@ -530,6 +819,7 @@
           if (this.sel.length > 1) {
             if (!this.t0) this.t0 = s.now;
             this.done++;
+            this.goalTick();
             this.idx = (this.idx + 1) % this.sel.length;
             this.lockUntil = s.now + 0.5;
             this.okSince = 0; this.success = false;
@@ -537,7 +827,8 @@
             this.showChord();
             return;
           }
-          v.textContent = 'Bien joué, l’accord sonne !'; v.className = 'verdict ok';
+          v.textContent = this.goal ? 'Bien joué ! Arrête le son, puis rejoue-le' : 'Bien joué, l’accord sonne !'; v.className = 'verdict ok';
+          this.goalTick();
         }
       } else {
         this.okSince = 0;

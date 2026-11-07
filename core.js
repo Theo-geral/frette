@@ -173,6 +173,11 @@
       sequence: [P(1, 3), P(2, 0), P(2, 2), P(2, 3), P(3, 0), P(3, 2), P(4, 0), P(4, 1), P(4, 0), P(3, 2), P(3, 0), P(2, 3), P(2, 2), P(2, 0), P(1, 3)],
     },
     {
+      id: 'penta', title: 'Pentatonique de Mi mineur', desc: 'Mi Sol La Si Ré sur les 6 cordes, aller et retour.',
+      sequence: [P(0, 0), P(0, 3), P(1, 0), P(1, 2), P(2, 0), P(2, 2), P(3, 0), P(3, 2), P(4, 0), P(4, 3), P(5, 0), P(5, 3),
+        P(5, 0), P(4, 3), P(4, 0), P(3, 2), P(3, 0), P(2, 2), P(2, 0), P(1, 2), P(1, 0), P(0, 3), P(0, 0)],
+    },
+    {
       id: 'mix', title: 'Révision 1re position', desc: 'Toutes les notes vues, dans le désordre.',
       pool: [P(0, 0), P(0, 1), P(0, 3), P(1, 0), P(1, 2), P(1, 3), P(2, 0), P(2, 2), P(2, 3), P(3, 0), P(3, 2), P(4, 0), P(4, 1), P(4, 3), P(5, 0), P(5, 1), P(5, 3)],
       count: 16,

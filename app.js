@@ -23,6 +23,32 @@
       o.prefs = o.prefs || {}; o.prefs[k] = v; this.write(o);
     },
   };
+  const Library = {
+    imported() {
+      const list = Store.read().imports || [];
+      return list.map((it) => {
+        const notes = it.notes.map((n) => ({ midi: C.STRINGS[n.s].midi + n.f, string: n.s, fret: n.f, dur: n.d, start: 0 }));
+        let t = 0; notes.forEach((n) => { n.start = t; t += n.dur; });
+        return { id: it.id, title: it.title, origin: 'Tablature importée', level: 0, bpm: it.bpm, notes, length: t, imported: true };
+      });
+    },
+    all() { return C.SONGS.concat(this.imported()); },
+    add(title, bpm, notes) {
+      const o = Store.read();
+      o.imports = o.imports || [];
+      const id = 'imp-' + Date.now().toString(36);
+      o.imports.push({ id, title, bpm, notes: notes.map((n) => ({ s: n.string, f: n.fret, d: n.dur })) });
+      Store.write(o);
+      return id;
+    },
+    remove(id) {
+      const o = Store.read();
+      o.imports = (o.imports || []).filter((x) => x.id !== id);
+      if (o.songs) delete o.songs[id];
+      Store.write(o);
+    },
+  };
+  const fold = (t) => String(t).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   const starsOf = (pct) => (pct == null ? 0 : pct >= 90 ? 3 : pct >= 70 ? 2 : 1);
   const starsHtml = (n) => '<span class="stars">' + [0, 1, 2].map((i) => (i < n ? '★' : '<span class="off">★</span>')).join('') + '</span>';
 
@@ -553,12 +579,12 @@
         el.innerHTML = micNotice() +
           '<div><div class="eyebrow">Mélodies</div><h1 style="font-size:32px">Jouer des morceaux</h1></div>' +
           '<p class="lead">Les notes défilent vers la ligne dorée. Joue chaque note quand elle l’atteint. Le chiffre indique la case, la couleur la corde.</p>' +
-          '<div class="list">' + C.SONGS.map((sg) => {
+          '<div class="list">' + Library.all().map((sg) => {
             const b = Store.best('songs', sg.id);
             return '<button class="item" type="button" data-id="' + sg.id + '"><h3>' + esc(sg.title) + '</h3><p>' + esc(sg.origin) + ' · ' + sg.notes.length + ' notes</p>' +
-              '<span class="side">' + starsHtml(starsOf(b)) + '<span class="lvl">niveau ' + sg.level + '</span></span></button>';
+              '<span class="side">' + starsHtml(starsOf(b)) + '<span class="lvl">' + (sg.imported ? 'importé' : 'niveau ' + sg.level) + '</span></span></button>';
           }).join('') + '</div>';
-        el.querySelectorAll('.item').forEach((b) => b.addEventListener('click', () => this.open(C.SONGS.find((x) => x.id === b.dataset.id))));
+        el.querySelectorAll('.item').forEach((b) => b.addEventListener('click', () => this.open(Library.all().find((x) => x.id === b.dataset.id))));
       } else if (this.mode === 'play') {
         el.innerHTML = micNotice() +
           '<div class="bar-head">' + back + '<h2>' + esc(this.song.title) + '</h2><span class="count" id="sgScore"></span></div>' +
@@ -673,7 +699,8 @@
       nm.textContent = C.noteName(n.midi).fr;
       nm.style.color = st.color;
       $('#sgPos', this.el).innerHTML = 'Corde ' + st.num + ' (' + st.name + ')<br>' + (n.fret === 0 ? 'à vide' : 'case ' + n.fret);
-      $('#sgBoard', this.el).innerHTML = fretboard([n], 5);
+      const maxF = Math.max.apply(null, this.notes.map((x) => x.fret));
+      $('#sgBoard', this.el).innerHTML = fretboard([n], Math.min(12, Math.max(5, maxF)));
     },
     sizeCanvas() {
       const c = this.canvas; if (!c || !c.isConnected) return;
@@ -755,8 +782,93 @@
   }
   document.addEventListener('visibilitychange', () => { if (document.hidden && Songs.playing) Songs.pause(); });
 
+  /* ================= Chercher / importer ================= */
+  const EXAMPLE_TAB = [
+    'e|-0-0-1-3-|-3-1-0---|-------0-|-0-------|',
+    'B|---------|-------3-|-1-1-3---|---3-3---|',
+    'G|---------|---------|---------|---------|',
+    'D|---------|---------|---------|---------|',
+    'A|---------|---------|---------|---------|',
+    'E|---------|---------|---------|---------|',
+  ].join('\n');
+  const Search = {
+    q: '',
+    mount(el) { this.el = el; this.render(); },
+    unmount() {},
+    render() {
+      const el = this.el;
+      el.innerHTML =
+        '<div><div class="eyebrow">Bibliothèque</div><h1 style="font-size:32px">Chercher un morceau</h1></div>' +
+        '<input class="field" id="srQ" type="search" placeholder="Titre du morceau…" autocomplete="off" value="' + esc(this.q) + '">' +
+        '<div class="list" id="srRes"></div>' +
+        '<div class="notice" style="gap:12px">' +
+          '<h2 style="font-size:24px">Importer une tablature</h2>' +
+          '<p>Le morceau que tu veux n\u2019est pas dans la liste ? Copie sa tablature (sur un site de tablatures, dans un livre…) et colle-la ici : Frette en fait un morceau qui défile.</p>' +
+          '<input class="field" id="tbTitle" type="text" placeholder="Titre" maxlength="60">' +
+          '<textarea class="field mono" id="tbText" rows="8" spellcheck="false" placeholder="' + esc(EXAMPLE_TAB) + '"></textarea>' +
+          '<label class="switch" style="justify-content:space-between">Tempo de départ <span><input class="field" id="tbBpm" type="number" min="40" max="200" value="80" style="width:84px;display:inline-block"> BPM</span></label>' +
+          '<p id="tbMsg" class="tb-msg"></p>' +
+          '<div class="row"><button class="btn ghost" id="tbEx" type="button">Coller l\u2019exemple</button><button class="btn primary" id="tbGo" type="button">Créer le morceau</button></div>' +
+          '<p class="tip" style="text-align:left">Seule la mélodie est gardée : quand plusieurs notes sont jouées ensemble (accord), Frette retient la plus aiguë. Les durées sont estimées d\u2019après l\u2019espacement des chiffres.</p>' +
+        '</div>';
+      const q = $('#srQ', el);
+      q.addEventListener('input', () => { this.q = q.value; this.results(); });
+      $('#tbEx', el).addEventListener('click', () => { $('#tbText', el).value = EXAMPLE_TAB; if (!$('#tbTitle', el).value) $('#tbTitle', el).value = 'Ode à la joie (tablature)'; this.preview(); });
+      $('#tbText', el).addEventListener('input', () => this.preview());
+      $('#tbGo', el).addEventListener('click', () => this.create());
+      this.results();
+    },
+    results() {
+      const box = $('#srRes', this.el);
+      const q = fold(this.q.trim());
+      const list = Library.all().filter((sg) => !q || fold(sg.title + ' ' + sg.origin).includes(q));
+      if (!list.length) {
+        box.innerHTML = '<p class="lead">Aucun morceau ne correspond à « ' + esc(this.q) + ' ». Tu peux importer sa tablature juste en dessous.</p>';
+        return;
+      }
+      box.innerHTML = list.map((sg) =>
+        '<div class="item" data-id="' + sg.id + '" role="button" tabindex="0"><h3>' + esc(sg.title) + '</h3><p>' + esc(sg.origin) + ' · ' + sg.notes.length + ' notes</p>' +
+        '<span class="side">' + (sg.imported ? '<button class="chip del" type="button" data-del="' + sg.id + '">Supprimer</button>' : '<span class="lvl">niveau ' + sg.level + '</span>') + '</span></div>').join('');
+      box.querySelectorAll('.item').forEach((it) => {
+        const go = (e) => { if (e.target.closest('[data-del]')) return; openSong(it.dataset.id); };
+        it.addEventListener('click', go);
+        it.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(e); });
+      });
+      box.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
+        if (b.dataset.armed) { Library.remove(b.dataset.del); this.results(); return; }
+        b.dataset.armed = '1'; b.textContent = 'Confirmer ?';
+        setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Supprimer'; } }, 3000);
+      }));
+    },
+    preview() {
+      const msg = $('#tbMsg', this.el), txt = $('#tbText', this.el).value;
+      if (!txt.trim()) { msg.textContent = ''; msg.className = 'tb-msg'; return null; }
+      const r = C.parseTab(txt);
+      if (r.error) { msg.textContent = r.error; msg.className = 'tb-msg bad'; return null; }
+      const frets = r.notes.map((n) => n.fret);
+      msg.textContent = r.notes.length + ' notes reconnues, cases ' + Math.min.apply(null, frets) + ' à ' + Math.max.apply(null, frets) + (r.chords ? ' · ' + r.chords + ' notes d\u2019accord ignorées' : '') + '.';
+      msg.className = 'tb-msg ok';
+      return r;
+    },
+    create() {
+      const r = this.preview();
+      const msg = $('#tbMsg', this.el);
+      if (!r) { if (!msg.textContent) { msg.textContent = 'Colle d\u2019abord une tablature.'; msg.className = 'tb-msg bad'; } return; }
+      const title = $('#tbTitle', this.el).value.trim() || 'Morceau importé';
+      const bpm = Math.max(40, Math.min(200, +$('#tbBpm', this.el).value || 80));
+      const id = Library.add(title, bpm, r.notes);
+      openSong(id);
+    },
+  };
+  function openSong(id) {
+    const sg = Library.all().find((x) => x.id === id);
+    if (!sg) return;
+    show('songs');
+    Songs.open(sg);
+  }
+
   /* ================= Navigation ================= */
-  const VIEWS = { tuner: Tuner, notes: Notes, chords: Chords, songs: Songs };
+  const VIEWS = { tuner: Tuner, notes: Notes, chords: Chords, songs: Songs, search: Search };
   let current = null;
   function show(name) {
     if (!VIEWS[name]) name = 'tuner';

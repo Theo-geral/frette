@@ -193,11 +193,11 @@
   }
 
   /* ---------- Morceaux (domaine public) ---------- */
-  function song(id, title, origin, level, bpm, seq) {
+  function song(id, title, origin, level, bpm, seq, transpose) {
     let t = 0;
     const notes = seq.map(([n, d]) => {
-      const midi = parseNote(n);
-      const pos = position(midi, 5);
+      const midi = parseNote(n) + (transpose || 0);
+      const pos = position(midi, 5) || position(midi, 12);
       const note = { midi, start: t, dur: d, string: pos.string, fret: pos.fret };
       t += d;
       return note;
@@ -228,12 +228,89 @@
       const b = [['G4', 1], ['G4', 1], ['F4', 1], ['F4', 1], ['E4', 1], ['E4', 1], ['D4', 2]];
       return [].concat(a, b, b, a);
     })()),
+    song('anniv', 'Joyeux anniversaire', 'Mildred et Patty Hill, 1893', 1, 100, [
+      ['G3', 0.75], ['G3', 0.25], ['A3', 1], ['G3', 1], ['C4', 1], ['B3', 2],
+      ['G3', 0.75], ['G3', 0.25], ['A3', 1], ['G3', 1], ['D4', 1], ['C4', 2],
+      ['G3', 0.75], ['G3', 0.25], ['G4', 1], ['E4', 1], ['C4', 1], ['B3', 1], ['A3', 2],
+      ['F4', 0.75], ['F4', 0.25], ['E4', 1], ['C4', 1], ['D4', 1], ['C4', 3],
+    ]),
+    song('vent', 'Vive le vent (refrain)', 'James Lord Pierpont, 1857', 2, 112, (() => {
+      const a = [['E4', 1], ['E4', 1], ['E4', 2], ['E4', 1], ['E4', 1], ['E4', 2], ['E4', 1], ['G4', 1], ['C4', 1.5], ['D4', 0.5], ['E4', 4],
+        ['F4', 1], ['F4', 1], ['F4', 1.5], ['F4', 0.5], ['F4', 1], ['E4', 1], ['E4', 1], ['E4', 0.5], ['E4', 0.5]];
+      return [].concat(a, [['E4', 1], ['D4', 1], ['D4', 1], ['E4', 1], ['D4', 2], ['G4', 2]],
+        a, [['G4', 1], ['G4', 1], ['F4', 1], ['D4', 1], ['C4', 4]]);
+    })()),
+    song('nuit', 'Douce nuit', 'Franz Xaver Gruber, 1818', 3, 84, [
+      ['G4', 1.5], ['A4', 0.5], ['G4', 1], ['E4', 3], ['G4', 1.5], ['A4', 0.5], ['G4', 1], ['E4', 3],
+      ['D5', 2], ['D5', 1], ['B4', 3], ['C5', 2], ['C5', 1], ['G4', 3],
+      ['A4', 2], ['A4', 1], ['C5', 1.5], ['B4', 0.5], ['A4', 1], ['G4', 1.5], ['A4', 0.5], ['G4', 1], ['E4', 3],
+      ['A4', 2], ['A4', 1], ['C5', 1.5], ['B4', 0.5], ['A4', 1], ['G4', 1.5], ['A4', 0.5], ['G4', 1], ['E4', 3],
+      ['D5', 2], ['D5', 1], ['F5', 1.5], ['D5', 0.5], ['B4', 1], ['C5', 3], ['E5', 3],
+      ['C5', 1], ['G4', 1], ['E4', 1], ['G4', 1.5], ['F4', 0.5], ['D4', 1], ['C4', 6],
+    ], -7),
   ];
+
+  /* ---------- Import de tablature ASCII ----------
+     Reconnaît les blocs de 6 lignes du type « e|---0---3---| » (corde aiguë en haut).
+     Garde la note la plus aiguë de chaque colonne (la mélodie). */
+  function parseTab(text) {
+    const lines = String(text || '').replace(/\t/g, '    ').split(/\r?\n/);
+    const isTab = (l) => {
+      const m = /^\s*([A-Ga-g][#b]?)?\s*[|:]\s*?([-0-9hpbrsx\/\\~|.()*^v<>=+ ]+)$/.exec(l);
+      if (!m || (m[2].match(/-/g) || []).length < 3) return null;
+      return m[2];
+    };
+    const systems = [];
+    let block = [];
+    const flush = () => {
+      for (let i = 0; i + 6 <= block.length; i += 6) systems.push(block.slice(i, i + 6));
+      block = [];
+    };
+    for (const l of lines) { const b = isTab(l); if (b != null) block.push(b); else flush(); }
+    flush();
+    if (!systems.length) return { notes: [], error: 'Aucune tablature reconnue. Il faut 6 lignes qui commencent par e| B| G| D| A| E|.' };
+
+    const events = [];
+    let offset = 0;
+    for (const sys of systems) {
+      const w = Math.max.apply(null, sys.map((r) => r.length));
+      const rows = sys.map((r) => r.padEnd(w, '-'));
+      let col = 0;
+      for (let c = 0; c < w; c++) {
+        if (rows.every((r) => r[c] === '|')) { col = Math.max(0, col - 1); continue; } // barre de mesure (et son tiret)
+        rows.forEach((r, i) => {
+          if (!/\d/.test(r[c]) || (c > 0 && /\d/.test(r[c - 1]))) return;
+          let num = r[c];
+          if (/\d/.test(r[c + 1] || '') && +(r[c] + r[c + 1]) <= 24) num += r[c + 1];
+          const string = 5 - i, fret = +num;
+          events.push({ col: offset + col, string, fret, midi: STRINGS[string].midi + fret });
+        });
+        col++;
+      }
+      offset += col;
+    }
+    if (!events.length) return { notes: [], error: 'La tablature ne contient aucune note (chiffre).' };
+
+    const byCol = new Map();
+    events.forEach((e) => { const p = byCol.get(e.col); if (!p || e.midi > p.midi) byCol.set(e.col, e); });
+    const seq = [...byCol.values()].sort((a, b) => a.col - b.col);
+    const gaps = seq.slice(1).map((e, i) => e.col - seq[i].col).sort((a, b) => a - b);
+    const unit = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 2;
+    let t = 0;
+    const notes = seq.map((e, i) => {
+      const gap = i + 1 < seq.length ? seq[i + 1].col - e.col : unit;
+      const dur = Math.min(4, Math.max(0.5, Math.round((gap / unit) * 2) / 2));
+      const n = { midi: e.midi, start: t, dur, string: e.string, fret: e.fret };
+      t += dur;
+      return n;
+    });
+    return { notes, length: t, chords: events.length - seq.length };
+  }
 
   const api = {
     NOTE_FR, NOTE_EN, STRINGS, CHORDS, LESSONS, SONGS,
     midiToFreq, freqToMidi, noteName, parseNote, position, pc,
-    detectPitch, rms, chordTemplate, chroma, cosine, classifyChord, lessonTargets,
+    detectPitch, rms, chordTemplate, chroma, cosine, classifyChord, lessonTargets, parseTab,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.FretteCore = api;

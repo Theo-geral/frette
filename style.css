@@ -227,3 +227,15 @@ textarea.field { resize: vertical; }
 .tb-msg.bad { color: var(--bad); }
 .chip.del { font-size: 13px; padding: 5px 10px; }
 div.item { cursor: pointer; }
+
+/* ---------- Musique de fond ---------- */
+.notice.bg h2 { margin-bottom: -2px; }
+.yt-wrap { width: 100%; max-width: 100%; height: 170px; border-radius: 10px; overflow: hidden; background: #000; }
+.yt-wrap iframe { width: 100%; height: 100%; display: block; border: 0; }
+.sync { display: flex; flex-direction: column; gap: 6px; }
+.sync label { font-size: 14px; color: var(--muted); }
+.sync-row { display: flex; gap: 8px; align-items: center; }
+.sync-row .field { width: 92px; flex: none; }
+.sync-row span { color: var(--muted); }
+.sync-row .btn { flex: 1; min-width: 0; padding-inline: 10px; }
+a.btn { text-decoration: none; color: inherit; text-align: center; }

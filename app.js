@@ -555,6 +555,43 @@
     },
   };
 
+  /* ================= Musique de fond (YouTube) ================= */
+  const Tracks = {
+    get(id) { const o = Store.read(); return (o.tracks && o.tracks[id]) || null; },
+    set(id, t) {
+      const o = Store.read(); o.tracks = o.tracks || {};
+      if (t) o.tracks[id] = t; else delete o.tracks[id];
+      Store.write(o);
+    },
+  };
+  function ytId(u) {
+    u = String(u || '').trim();
+    if (/^[\w-]{11}$/.test(u)) return u;
+    const m = /(?:youtu\.be\/|[?&]v=|\/shorts\/|\/embed\/|\/live\/)([\w-]{11})/.exec(u);
+    return m ? m[1] : null;
+  }
+  function loadYT() {
+    if (window.YT && window.YT.Player) return Promise.resolve();
+    if (!loadYT.p) {
+      loadYT.p = new Promise((res, rej) => {
+        const prev = window.onYouTubeIframeAPIReady;
+        window.onYouTubeIframeAPIReady = () => { if (prev) prev(); res(); };
+        const sc = document.createElement('script');
+        sc.src = 'https://www.youtube.com/iframe_api';
+        sc.onerror = () => { loadYT.p = null; rej(new Error('yt')); };
+        document.head.appendChild(sc);
+      });
+    }
+    return loadYT.p;
+  }
+  const YT_ERR = {
+    2: 'Ce lien ne correspond à aucune vidéo.',
+    5: 'Cette vidéo ne peut pas être lue ici.',
+    100: 'Vidéo introuvable ou privée.',
+    101: 'Le propriétaire de cette vidéo interdit sa lecture hors de YouTube. Essaie une autre version (cover, live, karaoké…).',
+    150: 'Le propriétaire de cette vidéo interdit sa lecture hors de YouTube. Essaie une autre version (cover, live, karaoké…).',
+  };
+
   /* ================= Morceaux ================= */
   const Songs = {
     mode: 'list', speed: 0.75, wait: true, playing: false,
@@ -568,12 +605,14 @@
     },
     unmount() {
       this.stop();
+      this.destroyPlayer();
       window.removeEventListener('resize', this.onResize);
       if (this.mode === 'play') this.mode = 'list';
     },
     render() {
       const el = this.el;
       this.stop();
+      this.destroyPlayer();
       const back = '<button class="back" type="button" aria-label="Retour"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 5l-7 7 7 7"/></svg></button>';
       if (this.mode === 'list') {
         el.innerHTML = micNotice() +
@@ -589,20 +628,24 @@
         el.innerHTML = micNotice() +
           '<div class="bar-head">' + back + '<h2>' + esc(this.song.title) + '</h2><span class="count" id="sgScore"></span></div>' +
           '<div class="hw-wrap"><canvas id="hw"></canvas></div>' +
+          (this.track ? '<div class="yt-wrap"><div id="ytPlayer"></div></div>' : '') +
           '<div class="now"><div class="nm" id="sgName"></div><div class="ps" id="sgPos"></div><div class="heard" style="margin-left:auto">Entendu : <b id="sgHeard">—</b></div></div>' +
           '<div class="board-wrap" id="sgBoard"></div>' +
           '<div class="ctrl"><div class="row" style="flex:1"><button class="btn primary" id="sgPlay" type="button">Jouer</button><button class="btn ghost" id="sgRestart" type="button">Recommencer</button></div></div>' +
           '<div class="ctrl"><div class="seg" role="group" aria-label="Vitesse">' + [0.5, 0.75, 1].map((v) =>
             '<button type="button" data-sp="' + v + '" aria-pressed="' + (v === this.speed) + '">' + Math.round(v * 100) + ' %</button>').join('') + '</div>' +
-          '<label class="switch"><input type="checkbox" id="sgWait"' + (this.wait ? ' checked' : '') + '> Attendre ma note</label></div>';
+          '<label class="switch"><input type="checkbox" id="sgWait"' + (this.waitOn() ? ' checked' : '') + (this.track ? ' disabled' : '') + '> Attendre ma note</label></div>' +
+          this.bgHtml();
         $('.back', el).addEventListener('click', () => { this.mode = 'list'; this.render(); });
         $('#sgPlay', el).addEventListener('click', () => (this.playing ? this.pause() : this.play()));
         $('#sgRestart', el).addEventListener('click', () => { this.reset(); this.play(); });
         el.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => {
           this.speed = +b.dataset.sp; Store.pref('speed', this.speed);
+          if (this.vid()) { try { this.yt.setPlaybackRate(this.speed); } catch (e) { /* ignoré */ } }
           el.querySelectorAll('.seg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
         }));
         $('#sgWait', el).addEventListener('change', (e) => { this.wait = e.target.checked; Store.pref('wait', this.wait); });
+        this.bindBg();
         this.canvas = $('#hw', el);
         this.sizeCanvas();
         this.updatePanel(true);
@@ -619,30 +662,124 @@
         $('#sgAgain', el).addEventListener('click', () => { this.mode = 'play'; this.reset(); this.render(); });
       }
     },
-    open(song) { this.song = song; this.mode = 'play'; this.reset(); this.render(); },
+    open(song) { this.song = song; this.track = Tracks.get(song.id); this.mode = 'play'; this.reset(); this.render(); },
+    bpm() { return this.track ? this.track.bpm : this.song.bpm; },
+    waitOn() { return this.wait && !this.track; },
+    vid() { return !!(this.track && this.ytReady && this.yt); },
+    ytMsg(t) { const m = $('#ytMsg', this.el); if (m) { m.textContent = t || ''; m.className = 'tb-msg' + (t ? ' bad' : ''); } },
+    destroyPlayer() {
+      if (this.yt) { try { this.yt.destroy(); } catch (e) { /* déjà détruit */ } }
+      this.yt = null; this.ytReady = false;
+    },
+    mountPlayer() {
+      this.ytReady = false; this.mt = 0; this.lastRep = -1;
+      const id = this.track.vid;
+      loadYT().then(() => {
+        if (this.mode !== 'play' || !$('#ytPlayer', this.el)) return;
+        this.yt = new window.YT.Player('ytPlayer', {
+          videoId: id, width: '100%', height: '100%',
+          playerVars: { playsinline: 1, rel: 0 },
+          events: {
+            onReady: () => { this.ytReady = true; try { this.yt.setPlaybackRate(this.speed); } catch (e) { /* ignoré */ } },
+            onError: (e) => this.ytMsg(YT_ERR[e.data] || 'Lecture impossible (erreur ' + e.data + ').'),
+            onStateChange: (e) => { if (e.data === 0 && this.mode === 'play' && this.started) this.finish(); },
+          },
+        });
+      }).catch(() => this.ytMsg('YouTube ne répond pas. Vérifie ta connexion internet.'));
+    },
+    bgHtml() {
+      const head = '<h2 style="font-size:22px">Musique de fond</h2>';
+      if (!this.track) {
+        const q = encodeURIComponent(this.song.title);
+        return '<div class="notice bg">' + head +
+          '<p>Joue par-dessus un enregistrement trouvé sur YouTube. Mets des écouteurs, sinon le micro entend aussi la musique.</p>' +
+          '<a class="btn ghost" href="https://www.youtube.com/results?search_query=' + q + '" target="_blank" rel="noopener">Chercher sur YouTube</a>' +
+          '<input class="field" id="ytUrl" type="url" inputmode="url" placeholder="Colle ici le lien de la vidéo" autocomplete="off">' +
+          '<p class="tb-msg" id="ytMsg"></p>' +
+          '<button class="btn" id="ytSet" type="button">Utiliser cette vidéo</button></div>';
+      }
+      const t = this.track;
+      return '<div class="notice bg">' + head +
+        '<p class="tb-msg" id="ytMsg"></p>' +
+        '<div class="sync"><label for="ytStart">Moment de la première note</label>' +
+        '<div class="sync-row"><input class="field" id="ytStart" type="number" step="0.1" min="0" value="' + t.start + '"><span>s</span><button class="btn" id="ytMark" type="button">Marquer maintenant</button></div>' +
+        '<label for="ytBpm">Tempo de l’enregistrement</label>' +
+        '<div class="sync-row"><input class="field" id="ytBpm" type="number" min="30" max="240" value="' + t.bpm + '"><span>BPM</span><button class="btn" id="ytTap" type="button">Taper le tempo</button></div></div>' +
+        '<p class="tip" style="text-align:left">Pour caler la musique : lance la vidéo, touche « Marquer maintenant » pile sur la première note de la mélodie, puis touche « Taper le tempo » au moins 4 fois en suivant le rythme. Ensuite « Recommencer ».</p>' +
+        '<button class="btn ghost" id="ytDel" type="button">Retirer la musique</button></div>';
+    },
+    bindBg() {
+      const el = this.el, sid = this.song.id;
+      if (!this.track) {
+        $('#ytSet', el).addEventListener('click', () => {
+          const id = ytId($('#ytUrl', el).value);
+          if (!id) { this.ytMsg('Lien non reconnu. Copie l’adresse de la vidéo (bouton Partager, puis Copier le lien).'); return; }
+          this.track = { vid: id, start: 0, bpm: this.song.bpm };
+          Tracks.set(sid, this.track);
+          this.reset(); this.render();
+        });
+        return;
+      }
+      const save = () => Tracks.set(sid, this.track);
+      $('#ytStart', el).addEventListener('change', (e) => { this.track.start = Math.max(0, +e.target.value || 0); save(); });
+      $('#ytBpm', el).addEventListener('change', (e) => { this.track.bpm = Math.max(30, Math.min(240, +e.target.value || this.song.bpm)); save(); });
+      $('#ytMark', el).addEventListener('click', () => {
+        if (!this.vid()) { this.ytMsg('La vidéo charge encore.'); return; }
+        this.track.start = Math.max(0, Math.round((this.yt.getCurrentTime() - 0.08) * 10) / 10);
+        $('#ytStart', el).value = this.track.start; save();
+      });
+      $('#ytTap', el).addEventListener('click', (e) => {
+        const now = performance.now();
+        if (!this.taps || now - this.taps[this.taps.length - 1] > 2000) this.taps = [];
+        this.taps.push(now);
+        if (this.taps.length < 4) { e.target.textContent = 'Encore ' + (4 - this.taps.length) + '…'; return; }
+        const iv = this.taps.slice(1).map((t, i) => t - this.taps[i]).sort((a, b) => a - b);
+        this.track.bpm = Math.round(60000 / iv[iv.length >> 1]);
+        $('#ytBpm', el).value = this.track.bpm; save();
+        e.target.textContent = 'Taper (' + this.track.bpm + ')';
+      });
+      $('#ytDel', el).addEventListener('click', () => { Tracks.set(sid, null); this.track = null; this.reset(); this.render(); });
+      this.mountPlayer();
+    },
     reset() {
       this.notes = this.song.notes.map((n) => Object.assign({}, n, { status: 'pending', flash: -10 }));
       this.beat = -4; this.ci = 0; this.hits = 0; this.wrongs = 0; this.playing = false; this.waiting = false;
-      this.counted = false; this.lastPanel = -1;
+      this.counted = false; this.lastPanel = -1; this.started = false;
+      if (this.vid()) { try { this.yt.pauseVideo(); } catch (e) { /* ignoré */ } }
       const b = $('#sgPlay', this.el); if (b) b.textContent = 'Jouer';
       this.updatePanel(true);
     },
     play() {
       if (!Engine.running) { startMic().then(() => { if (Engine.running) this.play(); }); return; }
       const ctx = Out.ctx();
+      if (this.track) {
+        if (!this.vid()) { this.ytMsg('La vidéo charge encore, réessaie dans un instant.'); return; }
+        if (!this.started) {
+          const to = Math.max(0, this.track.start - (4 * 60) / this.bpm());
+          this.yt.seekTo(to, true); this.mt = to; this.started = true;
+        }
+        try { this.yt.setPlaybackRate(this.speed); } catch (e) { /* ignoré */ }
+        this.yt.playVideo();
+        this.playing = true; this.wasWait = false;
+        this.lastT = performance.now();
+        this.consumed = Engine.s.onsetSeq;
+        $('#sgPlay', this.el).textContent = 'Pause';
+        return;
+      }
       if (this.beat <= -4 + 1e-6 && !this.counted) {
-        const spb = 60 / (this.song.bpm * this.speed);
+        const spb = 60 / (this.bpm() * this.speed);
         for (let k = 0; k < 4; k++) Out.click(ctx.currentTime + 0.05 + k * spb, k === 0);
         this.counted = true;
         this.beat = -4 - 0.05 / spb;
       }
-      this.playing = true; this.wasWait = this.wait;
+      this.playing = true; this.wasWait = this.waitOn();
       this.lastT = performance.now();
       this.consumed = Engine.s.onsetSeq;
       $('#sgPlay', this.el).textContent = 'Pause';
     },
     pause() {
       this.playing = false;
+      if (this.vid()) { try { this.yt.pauseVideo(); } catch (e) { /* ignoré */ } }
       const b = $('#sgPlay', this.el); if (b) b.textContent = 'Reprendre';
     },
     stop() { cancelAnimationFrame(this.raf); this.raf = 0; this.playing = false; },
@@ -650,6 +787,7 @@
       const step = (t) => {
         if (this.mode !== 'play') return;
         const dt = Math.min(0.1, (t - this.lastT) / 1000); this.lastT = t;
+        if (this.vid()) this.syncVideo(dt);
         if (this.playing) this.advance(dt);
         this.draw();
         this.raf = requestAnimationFrame(step);
@@ -657,22 +795,50 @@
       this.lastT = performance.now();
       this.raf = requestAnimationFrame(step);
     },
+    syncVideo(dt) {
+      let st, rep, rate;
+      try { st = this.yt.getPlayerState(); rep = this.yt.getCurrentTime() || 0; rate = this.yt.getPlaybackRate() || 1; } catch (e) { return; }
+      const on = st === 1;
+      if (on) {
+        this.mt += dt * rate;
+        if (rep !== this.lastRep) { if (Math.abs(rep - this.mt) > 0.25) this.mt = rep; else this.mt += (rep - this.mt) * 0.3; }
+      } else this.mt = rep;
+      this.lastRep = rep;
+      if (on !== this.playing && (st === 1 || st === 2)) {
+        this.playing = on;
+        if (on) { this.started = true; this.wasWait = false; this.consumed = Engine.s.onsetSeq; }
+        const b = $('#sgPlay', this.el); if (b) b.textContent = on ? 'Pause' : 'Reprendre';
+      }
+      if (!this.started) return;
+      this.beat = ((this.mt - this.track.start) * this.bpm()) / 60;
+      // retour en arrière dans la vidéo : on rejoue les notes concernées
+      if (this.ci > 0 && this.beat < this.notes[this.ci - 1].start - 1) {
+        let k = this.notes.findIndex((n) => n.start >= this.beat - 0.3);
+        if (k < 0) k = this.notes.length;
+        for (let i = k; i < this.notes.length; i++) this.notes[i].status = 'pending';
+        this.ci = k;
+        this.hits = this.notes.filter((n) => n.status === 'hit').length;
+      }
+    },
     advance(dt) {
-      const s = Engine.s, bps = (this.song.bpm * this.speed) / 60;
-      let nb = this.beat + dt * bps;
+      const s = Engine.s, v = this.vid();
+      const bps = (this.bpm() * (v ? (this.yt.getPlaybackRate() || 1) : this.speed)) / 60;
       const cur = this.notes[this.ci];
       this.waiting = false;
-      if (this.wait && cur && nb >= cur.start) { nb = cur.start; this.waiting = true; }
-      this.beat = nb;
+      if (!v) {
+        let nb = this.beat + dt * bps;
+        if (this.waitOn() && cur && nb >= cur.start) { nb = cur.start; this.waiting = true; }
+        this.beat = nb;
+      }
       if (cur) {
         const win = 0.28 * bps;
-        const canHit = this.wait ? this.beat >= cur.start - 1 : Math.abs(this.beat - cur.start) <= win;
+        const canHit = this.waitOn() ? this.beat >= cur.start - 1 : Math.abs(this.beat - cur.start) <= win;
         const same = s.stableMidi != null && (s.stableMidi - cur.midi) % 12 === 0;
         if (canHit && fresh(s, this.consumed) && same) {
           cur.status = 'hit'; this.hits++; this.consumed = s.onsetSeq; this.ci++;
-        } else if (this.wait && canHit && fresh(s, this.consumed) && !same && s.stableMidi != null && s.now - s.lastOnset > 0.15) {
+        } else if (this.waitOn() && canHit && fresh(s, this.consumed) && !same && s.stableMidi != null && s.now - s.lastOnset > 0.15) {
           this.wrongs++; this.consumed = s.onsetSeq; cur.flash = s.now;
-        } else if (!this.wait && this.beat > cur.start + win) {
+        } else if (!this.waitOn() && this.beat > cur.start + win) {
           cur.status = 'miss'; this.ci++;
         }
       }
@@ -680,6 +846,7 @@
       if (this.ci >= this.notes.length && this.beat > this.song.length + 0.5) this.finish();
     },
     finish() {
+      if (this.vid()) { try { this.yt.pauseVideo(); } catch (e) { /* ignoré */ } }
       this.stop();
       this.pct = this.wasWait
         ? Math.round((this.hits / Math.max(1, this.hits + this.wrongs)) * 100)
@@ -764,9 +931,11 @@
       for (let st = 0; st < 6; st++) { g.fillStyle = C.STRINGS[st].color; g.fillText(C.STRINGS[st].short, 10, laneY(st)); }
       // messages
       g.font = '600 16px "Barlow", sans-serif'; g.fillStyle = '#f4eadf'; g.textAlign = 'center';
-      if (this.beat < 0 && this.playing) {
+      if (this.beat < 0 && this.beat > -4 && this.playing) {
         g.font = '700 64px "Barlow Condensed", sans-serif'; g.globalAlpha = 0.9;
         g.fillText(String(Math.ceil(-this.beat)), W / 2, H / 2); g.globalAlpha = 1;
+      } else if (!this.playing && !this.started && this.track) {
+        g.fillText('Appuie sur « Jouer » : la musique démarre', W / 2 + 20, H - 14);
       } else if (!this.playing && this.beat <= -4 + 0.2) {
         g.fillText('Appuie sur « Jouer » : 4 clics, puis c’est parti', W / 2 + 20, H - 14);
       } else if (this.waiting) {
